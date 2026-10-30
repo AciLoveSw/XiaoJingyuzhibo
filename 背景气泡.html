@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0;width:1080px;height:1920px;background:transparent;overflow:hidden}
+  .b{position:absolute;border-radius:50%;border:2px solid rgba(165,215,255,.75);
+     background:radial-gradient(circle at 35% 30%, rgba(215,240,255,.75), rgba(130,190,255,.10));
+     animation:rise linear infinite}
+  @keyframes rise{
+    0%{transform:translateY(0) translateX(0);opacity:0}
+    8%{opacity:.9}
+    85%{opacity:.8}
+    100%{transform:translateY(-1600px) translateX(30px);opacity:0}
+  }
+</style></head>
+<body><div id="wrap"></div>
+<script>
+const wrap = document.getElementById("wrap");
+const N = 46;
+for (let i = 0; i < N; i++){
+  const d = document.createElement("div");
+  d.className = "b";
+  const size = 4 + Math.random() * 16;
+  d.style.width = size + "px";
+  d.style.height = size + "px";
+  d.style.left = (Math.random() * 1040) + "px";
+  d.style.top = (300 + Math.random() * 1600) + "px";
+  d.style.animationDuration = (9 + Math.random() * 14) + "s";
+  d.style.animationDelay = (-Math.random() * 18) + "s";
+  wrap.appendChild(d);
+}
+</script></body></html>

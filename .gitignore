@@ -1,0 +1,45 @@
+# ===== 凭据 / 隐私（绝对不进仓库）=====
+config.json
+_cookie.txt
+_登录配置/
+*.pfx
+采集区域.json
+
+# ===== 第三方二进制 / 依赖（体积大，自行下载）=====
+ffmpeg.exe
+_弹幕监听/
+_弹幕直连/
+_tts/
+__pycache__/
+*.pyc
+
+# ===== 缓存 / 运行时产物 =====
+_音乐缓存/
+音乐/
+背景音乐/
+*.wav
+*.mp3
+*.log
+
+# ===== 运行时状态与日志 =====
+*日志.txt
+*心跳.txt
+*数据.txt
+*队列.txt
+弹幕.txt
+进场.txt
+控制.txt
+动作.txt
+字幕.txt
+音量.json
+房间号.txt
+*.flag
+采集截图.png
+字幕卡.png
+
+# ===== 系统 / 编辑器 =====
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+.DS_Store

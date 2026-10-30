@@ -1,0 +1,88 @@
+# -*- coding: utf-8 -*-
+"""把一句话渲染成「气泡+文字」的透明卡片，给 OBS 图片源用
+
+画面最终会缩到 720p，字会变糊。所以：
+- 用 2 倍分辨率绘制，再 LANCZOS 缩回原尺寸（超采样，边缘更干净）
+- 字号从 42 提到 50，同样的框里字更大
+"""
+import os
+from PIL import Image, ImageDraw, ImageFont
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(BASE, "字幕卡.png")
+FB = r"C:\Windows\Fonts\msyhbd.ttc"
+W, H = 920, 310
+SS = 2                     # 超采样倍数
+BLUE = (74, 123, 208)
+BLACK = (27, 27, 27)
+
+
+def _wrap_balanced(draw, text, font, maxw):
+    """两行尽量等长，避免最后一行只剩一两个字"""
+    if draw.textlength(text, font=font) <= maxw:
+        return [text]
+    best, best_gap = None, 1e9
+    for i in range(1, len(text)):
+        a, b = text[:i], text[i:]
+        wa, wb = draw.textlength(a, font=font), draw.textlength(b, font=font)
+        if wa <= maxw and wb <= maxw:
+            gap = abs(wa - wb)
+            if gap < best_gap:
+                best, best_gap = [a, b], gap
+    return best if best else _wrap(draw, text, font, maxw)
+
+
+def _wrap(draw, text, font, maxw):
+    lines, cur = [], ""
+    for ch in text:
+        if draw.textlength(cur + ch, font=font) > maxw and cur:
+            lines.append(cur); cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def render(text, out=OUT):
+    w, h, s = W * SS, H * SS, SS
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    TOP, BOT, R = 10 * s, h - 96 * s, 46 * s
+    d.rounded_rectangle((10 * s, TOP, w - 10 * s, BOT), radius=R, fill=(255, 255, 255, 255))
+    d.polygon([(130 * s, BOT - 2 * s), (258 * s, BOT - 2 * s), (156 * s, h - 12 * s)],
+              fill=(255, 255, 255, 255))
+    d.rounded_rectangle((10 * s, TOP, w - 10 * s, BOT), radius=R, outline=BLUE, width=6 * s)
+    d.line([(132 * s, BOT), (256 * s, BOT)], fill=(255, 255, 255, 255), width=10 * s)
+    d.line([(132 * s, BOT - 1 * s), (156 * s, h - 14 * s)], fill=BLUE, width=6 * s)
+    d.line([(256 * s, BOT - 1 * s), (156 * s, h - 14 * s)], fill=BLUE, width=6 * s)
+
+    # 自动选字号：尽量用大字，但最多两行
+    maxw = w - 140 * s
+    lines, font, lh = None, None, 0
+    for size in (50, 46, 42, 38):
+        f = ImageFont.truetype(FB, size * s)
+        ls = _wrap_balanced(d, text, f, maxw)
+        if len(ls) <= 2:
+            lines, font, lh = ls, f, int(size * 1.28) * s
+            break
+    if lines is None:                       # 实在装不下就三行小字
+        font = ImageFont.truetype(FB, 36 * s)
+        lines = _wrap(d, text, font, maxw)[:3]
+        lh = int(36 * 1.28) * s
+
+    total = len(lines) * lh
+    y = (BOT - total) // 2 + 4 * s
+    for ln in lines:
+        tw = d.textlength(ln, font=font)
+        d.text(((w - tw) / 2, y), ln, font=font, fill=BLACK)
+        y += lh
+    im = im.resize((W, H), Image.LANCZOS)
+    im.save(out)
+    return out
+
+
+if __name__ == "__main__":
+    import sys
+    t = sys.argv[1] if len(sys.argv) > 1 else "喵~ 欢迎来到小鲸鱼的直播间"
+    print(render(t))

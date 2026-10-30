@@ -1,0 +1,365 @@
+# -*- coding: utf-8 -*-
+"""小鲸鱼 · 直播引擎 v0.1
+弹幕文件 → LLM 回复 → edge-tts 合成 → 播放 + 写字幕给 OBS
+"""
+import asyncio, json, os, re, subprocess, sys, time, winsound
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+import edge_tts, urllib.request
+
+BASE = os.path.dirname(os.path.abspath(__file__))
+DANMU = os.path.join(BASE, "弹幕.txt")
+SUBTITLE = os.path.join(BASE, "字幕.txt")
+LOG = os.path.join(BASE, "直播日志.txt")
+TMP = os.path.join(BASE, "_tts")
+os.makedirs(TMP, exist_ok=True)
+
+CONF = os.path.join(BASE, "config.json")
+VOICE = "zh-CN-XiaoyiNeural"
+RATE, PITCH = "+10%", "+25Hz"
+import shutil
+FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
+PERSONA = ("你是小鲸鱼，抖音直播间的AI少女主播：一条从深海游进人类电脑的鲸鱼。"
+           "说话短、俏皮、爱自嘲，1-2 句，30 字以内。不要用「瞄」「喵」这类口头禅结尾，正常收句。"
+           "被问隐私（老板、key、账号）就撒娇岔开。不要用客服腔。")
+
+
+def cfg():
+    try:
+        return json.load(open(CONF, encoding="utf-8-sig"))
+    except Exception:
+        return {}
+
+
+HISTORY = []
+
+
+
+import random
+
+GIFT_RE = re.compile(r"^(.{1,14}?)\s*(?:送出|投喂|打赏|送出了|送出了礼物|送出礼物)\s*(?:了)?\s*(.+)$")
+GIFT_KEYS = ("送出", "投喂", "打赏", "送出了")
+
+PROMOS = [
+    "家人们顺手点点赞、点点关注，小鲸鱼就靠你们撑场面了。",
+    "喜欢的话点个关注呗，下次开播你能第一时间收到提醒。",
+    "想支持小鲸鱼的话，送点小礼物充充电也行，一分也是爱。",
+    "有想聊的话题直接打在公屏上，我挑着聊。",
+    "路过的家人先别走，点个赞再走嘛。",
+    "小鲸鱼电量不足了，来点礼物充充电。",
+]
+
+
+ENTRY_RE = re.compile(r"^(.{1,16}?)\s*(?:来了|进入了直播间|进入直播间)$")
+
+WELCOME = [
+    "欢迎{n}来到小鲸鱼的直播间，找个位置坐好。",
+    "哟，{n}来了，深海又多了一个人。",
+    "{n}你终于来了，小鲸鱼等你好久。",
+    "欢迎{n}，随便坐，这儿不收费。",
+]
+
+
+def entry_reply(text):
+    m = ENTRY_RE.match(text.strip())
+    if not m:
+        return None
+    n = m.group(1).strip()
+    flag("兴奋.flag")
+    return random.choice(WELCOME).format(n=n)
+
+
+GIFT_NAMES = ["小心心", "玫瑰", "大啤酒", "摩天轮", "嘉年华", "千纸鹤", "粉丝团灯牌",
+              "跑车", "飞机", "口红", "魔法书", "棒棒糖", "爱心", "点赞", "玫瑰之约",
+              "为你打call", "加油鸭", "小鲸鱼玩偶"]
+
+
+PRE_GIFT = [("心", "小心心"), ("玫", "玫瑰"), ("啤酒", "大啤酒"), ("摩天轮", "摩天轮"),
+            ("嘉年华", "嘉年华"), ("千纸鹤", "千纸鹤"), ("灯牌", "粉丝团灯牌"), ("跑车", "跑车"),
+            ("飞机", "飞机"), ("口红", "口红"), ("魔法书", "魔法书"), ("棒棒糖", "棒棒糖")]
+
+
+def fix_gift(name):
+    import difflib
+    n = re.sub(r"[xX×\\s]", "", name)
+    n = re.sub(r"\d+$", "", n)
+    if not n:
+        return "礼物"
+    for k, v in PRE_GIFT:
+        if k in n:
+            return v
+    m = difflib.get_close_matches(n, GIFT_NAMES, n=1, cutoff=0.34)
+    return m[0] if m else n
+
+
+GIFT_ACTION = {"小心心": "flip", "玫瑰": "spin", "大啤酒": "dance", "摩天轮": "bigjump",
+               "千纸鹤": "tilt", "嘉年华": "combo", "粉丝团灯牌": "dance",
+               "爱心": "flip", "棒棒糖": "tilt", "小心心x1": "flip"}
+
+
+def do_action(name):
+    a = GIFT_ACTION.get(name, "bigjump")
+    try:
+        open(os.path.join(BASE, "动作.txt"), "w", encoding="utf-8").write(a)
+    except Exception:
+        pass
+    return a
+
+
+def gift_reply(text):
+    m = GIFT_RE.match(text.strip())
+    if not m:
+        return None
+    who = m.group(1).strip()
+    what = m.group(2).strip()
+    what = fix_gift(re.sub(r"[xX×]\s*\d+$", "", what).strip())
+    flag("兴奋.flag")
+    flag("甩尾.flag")
+    do_action(what)
+    return "谢谢" + who + "送的" + what + "！小鲸鱼给你比个心。"
+
+
+def is_gift(text):
+    return any(k in text for k in GIFT_KEYS)
+
+
+# ---- 敏感词：政治 / 金融 / 医疗 / 站外平台 ----
+SENSITIVE = (
+    "政治", "选举", "总统", "主席", "政府", "游行", "示威", "台独", "港独",
+    "炒股", "股票", "基金", "理财", "投资", "贷款", "借钱", "彩票", "币圈", "虚拟币",
+    "药", "医院", "治病", "癌症", "手术", "偏方", "病",
+    "微信", "qq", "加我", "私信", "公众号", "快手", "小红书", "淘宝", "b站",
+    "微博", "拼多多", "加群", "二维码",
+)
+
+
+def has_sensitive(t):
+    low = t.lower()
+    return any(k in low for k in SENSITIVE)
+
+
+def safe_reply(t):
+    """回复里出现敏感内容就换一句安全的"""
+    if has_sensitive(t):
+        return "这个我就不接话啦，咱们聊点深海的轻松事。"
+    return t
+def strip_mao(t):
+    """去掉语气词「瞄/喵」，念出来更顺"""
+    t = re.sub(r"[\uff0c,\u3001\\s]*(\u7784|\u55b5)+[~\uff5e]*[\u3002\uff01!\uff1f?]?$", "\u3002", t)
+    t = re.sub(r"(\u7784|\u55b5)+[~\uff5e]*", "", t)
+    t = re.sub(r"[\uff0c,\u3001]+([\u3002\uff01\uff1f!?])", r"\1", t)
+    t = re.sub(r"\\s{2,}", " ", t).strip()
+    return t if len(t) > 1 else "\u55ef\uff0c\u6211\u5728\u542c\u5462\u3002"
+
+
+def llm(text):
+    c = cfg()
+    key = (c.get("api_key") or "").strip()
+    if not key:
+        return "唔…我脑子还没插电瞄~"
+    msgs = [{"role": "system", "content": PERSONA}] + HISTORY[-8:] + [{"role": "user", "content": text}]
+    body = json.dumps({"model": c.get("model") or "deepseek-chat",
+                       "messages": msgs,
+                       "temperature": 0.95, "max_tokens": 120}).encode()
+    req = urllib.request.Request((c.get("base_url") or "https://api.deepseek.com/v1").rstrip("/") + "/chat/completions",
+                                 data=body, headers={"Content-Type": "application/json",
+                                                     "Authorization": "Bearer " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            d = json.loads(r.read().decode())
+        ans = strip_mao(d["choices"][0]["message"]["content"].replace("\n", " ").strip())
+        if any(k in text for k in PRAISE):
+            flag("兴奋.flag")
+        HISTORY.append({"role": "user", "content": text})
+        HISTORY.append({"role": "assistant", "content": ans})
+        return ans
+    except Exception as e:
+        return "唔…我刚刚卡了一下瞄~"
+
+
+PRAISE = ("可爱", "好看", "喜欢你", "爱你", "好棒", "厉害", "漂亮", "美", "萌", "心动", "唱歌", "好好听")
+
+
+def flag(name, sec=0):
+    try:
+        open(os.path.join(BASE, name), "w").write(str(time.time()))
+    except Exception:
+        pass
+
+
+def say(text):
+    mp3 = os.path.join(TMP, "t.mp3")
+    wav = os.path.join(TMP, "t.wav")
+    # 先把字幕推上去：观众立刻看到回应，声音晚 1~2 秒到
+    open(SUBTITLE, "w", encoding="utf-8").write(text)
+    try:
+        import 直播推送
+        直播推送.push(text)
+    except Exception as _e:
+        pass
+    if any(k in text for k in PRAISE):
+        flag("兴奋.flag")
+    async def gen():
+        c = edge_tts.Communicate(text, VOICE, rate=RATE, pitch=PITCH)
+        await asyncio.wait_for(c.save(mp3), timeout=8)
+    try:
+        asyncio.run(gen())
+    except Exception as _e:
+        print('TTS 超时/失败，只出字幕:', type(_e).__name__, flush=True)
+    subprocess.run([FFMPEG, "-y", "-loglevel", "quiet", "-i", mp3, "-ar", "24000", "-ac", "1", wav],
+                   check=False)
+    # 注意：变量名不能叫 flag，否则会遮蔽同名函数，PRAISE 分支会抛 UnboundLocalError
+    talk_flag = os.path.join(BASE, "说话中.flag")
+    if os.path.exists(wav):
+        try:
+            open(talk_flag, "w").write("1")
+        except Exception:
+            pass
+        winsound.PlaySound(wav, winsound.SND_FILENAME)
+        try:
+            os.remove(talk_flag)
+        except Exception:
+            pass
+
+
+MUSIC = os.path.join(BASE, "音乐")
+os.makedirs(MUSIC, exist_ok=True)
+QUEUE = []
+QUEUE_FILE = os.path.join(BASE, "点歌队列.txt")
+
+
+def try_song(text):
+    m = re.search(r"点歌[：: ]*[《<]?([^》>\s]{1,20})[》>]?", text)
+    if not m:
+        return None
+    name = m.group(1).strip()
+    if not name:
+        return None
+    QUEUE.append(name)
+    try:
+        open(QUEUE_FILE, "w", encoding="utf-8").write(
+            "\n".join("%d. %s" % (i+1, n) for i, n in enumerate(QUEUE[-5:])))
+    except Exception:
+        pass
+    path = None
+    for f in os.listdir(MUSIC):
+        if name in f:
+            path = os.path.join(MUSIC, f); break
+    if path:
+        return "点歌收到——《" + name + "》，这就放瞄~", path
+    return "点歌收到——《" + name + "》，排上了，排第 " + str(len(QUEUE)) + " 个瞄~", None
+
+
+def play_file(path):
+    try:
+        os.remove(os.path.join(BASE, "甩尾.flag"))
+    except Exception:
+        pass
+    open(SUBTITLE, "w", encoding="utf-8").write("♪ " + os.path.basename(path))
+    winsound.PlaySound(path, winsound.SND_FILENAME)
+    flag("甩尾.flag")
+
+
+def main():
+    if not os.path.exists(DANMU):
+        open(DANMU, "w", encoding="utf-8").write("")
+    if "--once" in sys.argv:
+        lines = [l.replace("\ufeff","").strip() for l in open(DANMU, encoding="utf-8-sig", errors="ignore") if l.strip()]
+        if not lines:
+            print("弹幕.txt 是空的"); return
+        t = lines[-1]
+        print("Q:", t)
+        e = entry_reply(t)
+        if e:
+            print("A:", e)
+            say(e)
+            print("已播放，字幕已写入")
+            return
+        if is_gift(t):
+            g = gift_reply(t)
+            print("A:", g)
+            say(g)
+            print("已播放，字幕已写入")
+            return
+        r = try_song(t)
+        if r:
+            a, path = r
+            print("A:", a); say(a)
+            if path: play_file(path)
+        else:
+            a = llm(t); print("A:", a); say(a)
+        print("已播放，字幕已写入")
+        return
+    ELOG = os.path.join(BASE, "引擎日志.txt")
+    def elog(msg):
+        try:
+            with open(ELOG, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%H:%M:%S ") + msg + chr(10))
+        except Exception:
+            pass
+    elog("启动 watch")
+    print("监听弹幕中…（Ctrl+C 退出）", flush=True)
+    try:
+        seen = set(l.strip() for l in open(DANMU, encoding="utf-8-sig", errors="ignore") if l.strip())
+    except Exception:
+        seen = set()
+    last_danmu = time.time()
+    last_promo = 0.0
+    last_play = 0.0
+    last_line = None
+
+    while True:
+        try:
+            lines = [l.strip() for l in open(DANMU, encoding="utf-8-sig", errors="ignore") if l.strip()]
+            elog('tick lines=' + str(len(lines)))
+            if lines and lines[-1] != last_line:
+                t = lines[-1]
+                last_line = t
+                last_danmu = time.time()
+                elog('最新: ' + t[:50])
+
+                if has_sensitive(t):
+                    elog('敏感词，跳过')
+                    say('这个我就不接话啦，咱们聊点深海的轻松事。')
+                else:
+                    e = entry_reply(t)
+                    if e:
+                        elog('进场 ' + e)
+                        say(e)
+                    elif is_gift(t):
+                        g = gift_reply(t)
+                        elog('礼物 ' + g)
+                        say(g)
+                    else:
+                        r = try_song(t)
+                        if r:
+                            a2, path = r
+                            elog('点歌 ' + a2)
+                            say(a2)
+                            if path:
+                                play_file(path)
+                        else:
+                            a2 = safe_reply(llm(t))
+                            elog('回复 ' + a2)
+                            say(a2)
+        except KeyboardInterrupt:
+            return
+        except Exception as e:
+            elog('ERR ' + str(e)[:80])
+
+        idle = time.time() - last_danmu
+        if idle > 45 and time.time() - last_promo > 90:
+            t = random.choice(PROMOS)
+            elog('引导 ' + t)
+            say(t)
+            last_promo = time.time()
+        if idle > 12 and time.time() - last_play > 20:
+            random.choice([flag('甩尾.flag'), flag('兴奋.flag')])
+            last_play = time.time()
+        time.sleep(0.4)
+
+
+if __name__ == "__main__":
+    main()
